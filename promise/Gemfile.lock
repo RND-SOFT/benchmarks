@@ -1,0 +1,18 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    benchmark (0.2.1)
+    concurrent-ruby (1.2.2)
+    thread (0.2.2)
+
+PLATFORMS
+  ruby
+  x86_64-linux
+
+DEPENDENCIES
+  benchmark
+  concurrent-ruby
+  thread
+
+BUNDLED WITH
+   2.4.12
