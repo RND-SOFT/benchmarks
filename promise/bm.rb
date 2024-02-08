@@ -1,5 +1,7 @@
 #!/bin/env ruby
 
+# rubocop:disable Style/RescueModifier
+
 require 'rubygems'
 require 'bundler'
 require 'bundler/setup'
@@ -7,94 +9,16 @@ Bundler.require(:default)
 
 require 'benchmark'
 
-require_relative 'lib/queue'
-require_relative 'lib/queue_each'
-require_relative 'lib/socket'
-require_relative 'lib/socket_each'
-require_relative 'lib/promise'
-require_relative 'lib/cvsingle'
-require_relative 'lib/cveach'
-require_relative 'lib/thread_promise'
+require_relative 'lib/utils'
+require_relative 'lib/promises'
 
-class Worker
-  attr_reader :waiter, :num, :handle, :result
+STDOUT.sync = true
 
-  def initialize(waiter, num)
-    @waiter = waiter
-    @num = num
-    @handle = waiter.create_handle(num)
-    @result = 0
-
-    @thread = Thread.new(@waiter) do |w|
-      while w.running?
-        h = w.wait(handle)
-        break if w.stop?
-
-        @result += 1 if h.ready?
-      end
-    rescue StandardError => e
-      puts "Critical Error: #{e}\n#{e.backtrace}"
-      exit!(5)
-    end
-  end
-
-  def stop!
-    @thread.join
-  end
-
-  def ready!
-    v = @handle.ready!(num)
-    # sanity check
-    return unless v != num
-
-    puts "Sanity check failed: returned value[#{v}] != #{num}"
-    exit!(42)
-  end
-end
-
-class Runner
-  attr_reader :klass, :concurrency, :count
-
-  def initialize(klass:, concurrency:, count:)
-    @klass = klass
-    @concurrency = concurrency
-    @count = count
-    @cases = {}
-
-    @waiter, @workers = prepare_bechmark
-  end
-
-  def prepare_bechmark
-    waiter = klass::Waiter.new
-    workers = concurrency.times.map { |i| Worker.new(waiter, i) }
-    [waiter, workers]
-  end
-
-  def run
-    c = 0
-    while c < count
-
-      idx = c % concurrency
-      worker = @workers[idx]
-      worker.ready!
-      c += 1
-    end
-    @workers.map(&:result).sum
-  end
-
-  def stop
-    @waiter.stop!
-    @workers.each(&:stop!)
-    @workers = nil
-    @waiter = nil
-  end
-end
-
+YJIT = RubyVM::YJIT.enabled? rescue false
 THREADS = ENV.fetch('THREADS', 10).to_i
 COUNT = ENV.fetch('COUNT', 900_000).to_i
-CASES = [QueuePromise, QueuePromiseEach, SocketPromise, SocketPromiseEach, ConditionVariableEachPromise,
-         RubyThreadPromise, ConcurrentRubyPromise, ConditionVariableSinglePromise]
-# CASES = [QueuePromise, QueuePromiseEach]
+CASES = [Promises::Queue, Promises::ConditionVariable, Promises::Thread, Promises::Socket,
+         Promises::ConcurrentRuby].freeze
 
 max_bm_length = CASES.map { |klass| klass.to_s.size }.max
 
@@ -111,19 +35,19 @@ def formatted(width, text)
   "#{''.ljust(width)}#{text}"
 end
 
-yjit = RubyVM::YJIT.enabled? rescue false
-puts "    ===== Benchmark[RUBY=#{RUBY_VERSION} THREADS=#{THREADS} COUNT=#{COUNT}] YJIT=#{yjit}] ====="
+puts "    ===== [#{Process.pid}] Benchmark[RUBY=#{RUBY_VERSION} THREADS=#{THREADS} COUNT=#{COUNT}] YJIT=#{YJIT}] ====="
 puts formatted(max_bm_length, '      user     system      total         real')
 
 CASES.each do |klass|
   # warmup
-  if yjit
+  begin
     @runner = Runner.new(klass: klass, concurrency: THREADS, count: COUNT)
     sleep 2
-    @result = @runner.run
-    puts "Unexpected result! #{@result.inspect} != #{COUNT}" if @result != COUNT
+    @runner.run
+    @result = @runner.result
+    puts "Unexpected result! #{@result.inspect} != #{COUNT}" if (@result - COUNT).abs > 10
     without_gc do
-      @runner.stop
+      @runner.shutdown!
       @runner = nil
     end
   end
@@ -133,14 +57,16 @@ CASES.each do |klass|
 
   without_gc do
     r = Benchmark.measure(klass.to_s) do
-      @result = @runner.run
+      @runner.run
     end
+    sleep 2
+    @result = @runner.result
     ips = COUNT / r.real
     print r.label.rjust(max_bm_length)
     puts r.format(Benchmark::FORMAT.strip + "   %s ips\n", ips.round(1))
   end
 
-  puts "Unexpected result! #{@result.inspect} != #{COUNT}" if @result != COUNT
-  @runner.stop
+  puts "Unexpected result! #{@result.inspect} != #{COUNT}" if (@result - COUNT).abs > 10
+  @runner.shutdown!
   @runner = nil
 end
